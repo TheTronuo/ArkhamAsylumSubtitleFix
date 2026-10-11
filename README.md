@@ -3,7 +3,7 @@
 | Store | Status |
 | :--- | :---: |
 | <img src="https://cdn.simpleicons.org/steam/1B6D9B" width="20" height="20" alt="Steam"> **Steam GOTY** | ✅ Tested |
-| <img src="https://cdn.simpleicons.org/gogdotcom/86328A" width="20" height="20" alt="GOG"> **GOG** | ⏳ Testing |
+| <img src="https://cdn.simpleicons.org/gogdotcom/86328A" width="20" height="20" alt="GOG"> **GOG** | ✅ Tested |
 | <img src="https://cdn.simpleicons.org/epicgames/777777" width="20" height="20" alt="Epic Games"> **Epic Games** | ⏳ Not yet |
 
 Configurable subtitle size and vertical positioning for **Batman: Arkham Asylum GOTY (Windows)**.
