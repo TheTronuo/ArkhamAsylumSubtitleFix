@@ -1,6 +1,5 @@
 @echo off
 setlocal
-set "ARKHAM_TEST_EXE=%~1"
 if /i "%VSCMD_ARG_TGT_ARCH%"=="x86" goto compile
 set "ARKHAM_VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 if not exist "%ARKHAM_VSWHERE%" (
@@ -20,9 +19,5 @@ cl /nologo /W4 /O2 /MT /EHsc /LD src\Loader.cpp /Fobuild\Loader.obj /Febuild\din
 if errorlevel 1 exit /b 1
 cl /nologo /W4 /O2 /MT /EHsc src\Tests.cpp /Fobuild\Tests.obj /Febuild\Tests.exe /link /MACHINE:X86 advapi32.lib
 if errorlevel 1 exit /b 1
-if defined ARKHAM_TEST_EXE (
-  build\Tests.exe "%ARKHAM_TEST_EXE%"
-) else (
-  build\Tests.exe
-)
+build\Tests.exe %*
 exit /b %errorlevel%

@@ -83,8 +83,18 @@ static bool ApplyPatches(Patch (&p)[kPatchCount]) {
     return true;
 }
 static bool SupportedExe(const wchar_t* path) {
-    const BYTE expected[]={0x4d,0xac,0x1f,0x5e,0x2a,0xc6,0x71,0x0b,0x73,0x78,0xfd,0xce,0x74,0x60,0x1f,0x61,
-        0x6f,0x47,0x53,0xe3,0x75,0x6c,0xb5,0xfd,0xa6,0x3c,0x75,0x19,0xcc,0x2e,0xb0,0x28};
+    // Exact inspected builds only. Their 13 subtitle hook sites are identical.
+    const BYTE expected[][32]={
+        // Original Steam GOTY.
+        {0x4d,0xac,0x1f,0x5e,0x2a,0xc6,0x71,0x0b,0x73,0x78,0xfd,0xce,0x74,0x60,0x1f,0x61,
+         0x6f,0x47,0x53,0xe3,0x75,0x6c,0xb5,0xfd,0xa6,0x3c,0x75,0x19,0xcc,0x2e,0xb0,0x28},
+        // Supplied GOG build, without the Joker DLC patch.
+        {0x94,0x83,0xc5,0x08,0x4c,0x7e,0xf0,0x2d,0x72,0x43,0x61,0x6d,0xbc,0x31,0x21,0x93,
+         0x63,0x65,0x2f,0xc7,0x3b,0xb2,0x9a,0x15,0x5a,0x99,0x40,0xf5,0xcb,0x1c,0xc6,0xcd},
+        // Same supplied build with the two-byte Joker DLC patch.
+        {0x6d,0x10,0x55,0xfb,0xd9,0xb9,0x47,0xd6,0xa1,0x73,0x71,0x1b,0xbd,0x73,0x7a,0x11,
+         0xb9,0x70,0x76,0xfd,0xaf,0x3b,0x0c,0x7c,0xb6,0xae,0xba,0xd0,0x05,0xd7,0xf5,0xe6}
+    };
     HANDLE f=CreateFileW(path,GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
     if(f==INVALID_HANDLE_VALUE) return false;
     HCRYPTPROV provider=0; HCRYPTHASH hash=0;
@@ -96,10 +106,12 @@ static bool SupportedExe(const wchar_t* path) {
         ok=CryptHashData(hash,buffer,n,0)!=FALSE;
     }
     BYTE actual[32]; DWORD size=sizeof(actual);
-    ok=ok && CryptGetHashParam(hash,HP_HASHVAL,actual,&size,0) && size==32 && !memcmp(actual,expected,32);
+    ok=ok && CryptGetHashParam(hash,HP_HASHVAL,actual,&size,0) && size==32;
+    bool supported=false;
+    if(ok) for(const auto& candidate:expected) if(!memcmp(actual,candidate,32)) { supported=true; break; }
     if(hash) CryptDestroyHash(hash);
     if(provider) CryptReleaseContext(provider,0);
-    CloseHandle(f); return ok;
+    CloseHandle(f); return supported;
 }
 #ifndef SUBTITLE_TEST
 extern "C" __declspec(dllexport) BOOL __cdecl InitializeSubtitleScale() {
@@ -115,7 +127,7 @@ extern "C" __declspec(dllexport) BOOL __cdecl InitializeSubtitleScale() {
     wcscpy_s(dot,MAX_PATH-(dot-g_logPath),L".log");
     HANDLE log=CreateFileW(g_logPath,GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
     if(log!=INVALID_HANDLE_VALUE) CloseHandle(log);
-    Log("Arkham Subtitle Scale 0.2 draft (x86).\r\n");
+    Log("Arkham Subtitle Scale 0.2.1 (x86).\r\n");
     if(!GetPrivateProfileIntW(L"Subtitles",L"Enabled",1,ini)) { Log("Disabled; no hooks installed.\r\n"); return TRUE; }
     wchar_t value[64]; GetPrivateProfileStringW(L"Subtitles",L"Scale",L"2.0",value,64,ini);
     wchar_t* end=nullptr; double parsed=wcstod(value,&end);

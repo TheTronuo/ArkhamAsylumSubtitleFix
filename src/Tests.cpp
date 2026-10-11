@@ -11,6 +11,23 @@ static void __cdecl MockDraw(void* canvas,float x,float y,const wchar_t*,void*,c
     observedCanvas=canvas; observedX=x; observedY=y; observedSX=sx; observedSY=sy;
     assert(spacing==0 && !extra);
 }
+static void CheckRejectedMutation(const wchar_t* path) {
+    // Change one byte in a temporary copy, leaving the supplied EXE untouched.
+    wchar_t temporary[MAX_PATH];
+    assert(GetTempFileNameW(L"build",L"ass",0,temporary));
+    assert(CopyFileW(path,temporary,FALSE));
+    HANDLE file=CreateFileW(temporary,GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    assert(file!=INVALID_HANDLE_VALUE);
+    BYTE value; DWORD count;
+    assert(ReadFile(file,&value,1,&count,nullptr) && count==1);
+    value^=1;
+    assert(SetFilePointer(file,0,nullptr,FILE_BEGIN)==0);
+    assert(WriteFile(file,&value,1,&count,nullptr) && count==1);
+    CloseHandle(file);
+    bool accepted=SupportedExe(temporary);
+    assert(DeleteFileW(temporary));
+    assert(!accepted);
+}
 int wmain(int argc,wchar_t** argv) {
     g_measure=MockMeasure; g_draw=MockDraw; g_drawLogged=1;
     for(float scale:{1.0f,1.5f,2.0f,2.5f,3.0f}) {
@@ -55,7 +72,10 @@ int wmain(int argc,wchar_t** argv) {
         assert(info.Protect==PAGE_EXECUTE_READ);
     }
     VirtualFree(memory,0,MEM_RELEASE);
-    if(argc>1) assert(SupportedExe(argv[1]));
+    if(argc>1) for(int i=1;i<argc;i++) {
+        assert(SupportedExe(argv[i]));
+        CheckRejectedMutation(argv[i]);
+    }
     else puts("SKIP: supported game EXE hash check (supply its absolute path to enable).");
     assert(!SupportedExe(L"build\\Tests.exe"));
     HMODULE proxy=LoadLibraryW(L"build\\dinput8.dll"); assert(proxy);
