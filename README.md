@@ -8,7 +8,7 @@
 
 Configurable subtitle size and vertical positioning for **Batman: Arkham Asylum GOTY (Windows)**.
 
-**Version 0.2.1 adds GOG support**, with and without the Joker DLC patch. GOG gameplay verification is pending. Subtitle scaling at 3x has been confirmed in gameplay at 3840x2160; vertical positioning and other subtitle scenes still need verification.
+**Version 0.2.2 adds separate vertical positioning for video cutscene subtitles.** Video subtitles start lower than gameplay subtitles, so they can now use their own offset. GOG support from v0.2.1 is retained, with and without the Joker DLC patch. Subtitle scaling at 3x has been confirmed in gameplay at 3840x2160. A user reported aligned gameplay and video subtitles with `VerticalOffset=100` and `CutsceneVerticalOffset=-50`; the new binary has passed automated tests, but has not yet been verified in-game by the maintainer.
 
 <details>
 <summary><strong>In-game preview — click to expand</strong><br><br></summary>
@@ -40,16 +40,20 @@ Edit `Binaries/ArkhamSubtitleScale.ini`, then restart the game:
 [Subtitles]
 Enabled=1
 Scale=3.0
-VerticalOffset=160
+VerticalOffset=100
+CutsceneVerticalOffset=-50
 ```
 
 | Setting | Meaning |
 | --- | --- |
 | `Enabled` | `0` disables subtitle modifications; `1` enables them. |
 | `Scale` | Size multiplier, from `0.5` to `4.0`. Use a decimal point. `1.0` is the original size. |
-| `VerticalOffset` | Offset in pixels at the current rendering resolution, from `-1000` to `1000`. Positive moves down; negative moves up; `0` keeps the game's original position. |
+| `VerticalOffset` | Gameplay subtitle offset in pixels at the current rendering resolution, from `-1000` to `1000`. Positive moves down; negative moves up; `0` keeps the game's original position. |
+| `CutsceneVerticalOffset` | Separate offset for video cutscene subtitles, with the same range and direction. If omitted, inherits `VerticalOffset` to preserve existing INI behavior. |
 
-The supplied 3x scale and 160-pixel offset are starting values for 3840x2160, not automatic resolution scaling. Large offsets can move text off-screen. Use `Scale=1.0` and `VerticalOffset=0` for the original draw size and position.
+The supplied 3x scale and offsets are starting values based on a user report, not automatic resolution scaling. Adjust both offsets for your resolution. Large offsets can move text off-screen. Use `Scale=1.0`, `VerticalOffset=0`, and `CutsceneVerticalOffset=0` for the original draw size and position.
+
+When updating, keep your existing INI and add `CutsceneVerticalOffset=-50` under `[Subtitles]` to tune video subtitles independently. In-engine cinematic scenes continue to use the gameplay setting when drawn through that path. Restart the game after any INI change.
 
 <details>
 <summary><strong>Supported executable hashes</strong></summary>

@@ -28,8 +28,36 @@ static void CheckRejectedMutation(const wchar_t* path) {
     assert(DeleteFileW(temporary));
     assert(!accepted);
 }
+static void CheckOffsetSettings() {
+    wchar_t relative[MAX_PATH],ini[MAX_PATH];
+    assert(GetTempFileNameW(L"build",L"ini",0,relative));
+    assert(GetFullPathNameW(relative,MAX_PATH,ini,nullptr));
+    assert(WritePrivateProfileStringW(L"Subtitles",L"VerticalOffset",L"100",ini));
+    assert(ReadVerticalOffsets(ini));
+    assert(g_verticalOffset==100 && g_cutsceneVerticalOffset==100);
+    assert(WritePrivateProfileStringW(L"Subtitles",L"CutsceneVerticalOffset",L"-50",ini));
+    assert(ReadVerticalOffsets(ini));
+    assert(g_verticalOffset==100 && g_cutsceneVerticalOffset==-50);
+    for(const wchar_t* key:{L"VerticalOffset",L"CutsceneVerticalOffset"}) {
+        for(const wchar_t* bad:{L"oops",L"nan",L"inf",L"1001",L"-1001",L"50px"}) {
+            assert(WritePrivateProfileStringW(L"Subtitles",key,bad,ini));
+            assert(!ReadVerticalOffsets(ini));
+            assert(g_verticalOffset==100 && g_cutsceneVerticalOffset==-50);
+        }
+        assert(WritePrivateProfileStringW(L"Subtitles",key,key[0]==L'V'?L"100":L"-50",ini));
+    }
+    assert(WritePrivateProfileStringW(L"Subtitles",L"VerticalOffset",L"-1000",ini));
+    assert(WritePrivateProfileStringW(L"Subtitles",L"CutsceneVerticalOffset",L"1000",ini));
+    assert(ReadVerticalOffsets(ini));
+    assert(g_verticalOffset==-1000 && g_cutsceneVerticalOffset==1000);
+    assert(WritePrivateProfileStringW(L"Subtitles",nullptr,nullptr,ini));
+    assert(ReadVerticalOffsets(ini));
+    assert(g_verticalOffset==0 && g_cutsceneVerticalOffset==0);
+    assert(DeleteFileW(ini));
+}
 int wmain(int argc,wchar_t** argv) {
     g_measure=MockMeasure; g_draw=MockDraw; g_drawLogged=1;
+    CheckOffsetSettings();
     for(float scale:{1.0f,1.5f,2.0f,2.5f,3.0f}) {
         g_scale=scale;
         for(float offset:{-160.0f,0.0f,160.0f}) {
@@ -39,6 +67,16 @@ int wmain(int argc,wchar_t** argv) {
         assert(observedSX==scale && observedSY==scale);
         DrawScaled((void*)1,1001,1901,L"A long subtitle",(void*)2,(void*)3);
         assert(observedX==1001-100*scale && observedY==1901+offset);
+        for(float cutsceneOffset:{-50.0f,0.0f,100.0f}) {
+            g_cutsceneVerticalOffset=cutsceneOffset;
+            DrawCutsceneScaled((void*)1,1000,1900,L"Video subtitle",(void*)2,(void*)3);
+            assert(observedCanvas==(void*)1 && observedX==1000-100*scale && observedY==1900+cutsceneOffset);
+            assert(observedSX==scale && observedSY==scale);
+            DrawCutsceneScaled((void*)1,1001,1901,L"Video subtitle",(void*)2,(void*)3);
+            assert(observedX==1001-100*scale && observedY==1901+cutsceneOffset);
+            DrawScaled((void*)1,1000,1900,L"Gameplay subtitle",(void*)2,(void*)3);
+            assert(observedY==1900+offset);
+        }
         }
     }
     g_steps[0]=36; g_steps[1]=52;
@@ -59,6 +97,15 @@ int wmain(int argc,wchar_t** argv) {
     BYTE* memory=(BYTE*)VirtualAlloc(nullptr,0x960000,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
     assert(memory);
     Patch patches[kPatchCount]={}; MakePatches(memory,patches);
+    const uint32_t expectedDraws[]={0x9458d7,0x945913,0x94594f,0x94598b,0x9459c0,
+                                    0x956212,0x95624e,0x95628a,0x9562c6,0x9562fb};
+    for(unsigned i=0;i<10;i++) {
+        assert(patches[i].at==memory+expectedDraws[i] && patches[i].size==5);
+        assert(patches[i].after[0]==0xe8);
+        uint32_t relative; memcpy(&relative,patches[i].after+1,4);
+        uintptr_t target=(uintptr_t)(patches[i].at+5)+relative;
+        assert(target==(uintptr_t)(i<5?DrawScaled:DrawCutsceneScaled));
+    }
     for(const auto& p:patches) memcpy(p.at,p.before,p.size);
     patches[12].at[0]^=1;
     assert(!ApplyPatches(patches));
@@ -85,6 +132,6 @@ int wmain(int argc,wchar_t** argv) {
     IUnknown* input=nullptr;
     HRESULT hr=create(GetModuleHandleW(nullptr),0x0800,iid,(void**)&input,nullptr);
     assert(SUCCEEDED(hr) && input); input->Release();
-    puts("PASS: centered draw ABI/scales/vertical offsets/shadow alignment, x86 line hooks, conflict refusal, patch transaction/protections, EXE SHA256, DirectInput proxy forwarding.");
+    puts("PASS: centered draw ABI/scales/independent gameplay and video offsets/shadow alignment, INI fallback and validation, all ten draw destinations, x86 line hooks, conflict refusal, patch transaction/protections, EXE SHA256, DirectInput proxy forwarding.");
     return 0;
 }

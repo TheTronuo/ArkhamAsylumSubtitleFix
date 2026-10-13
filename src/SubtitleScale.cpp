@@ -10,6 +10,7 @@
 
 static float g_scale = 2.0f;
 static float g_verticalOffset = 0.0f;
+static float g_cutsceneVerticalOffset = 0.0f;
 static int g_steps[2] = {36,52};
 using MeasureFn = void (__cdecl*)(void*,int*,int*,const wchar_t*,...);
 using DrawFn = void (__cdecl*)(void*,float,float,const wchar_t*,void*,const void*,float,float,float,const void*);
@@ -21,13 +22,36 @@ static void Log(const char* message) {
     HANDLE f=CreateFileW(g_logPath,FILE_APPEND_DATA,FILE_SHARE_READ,nullptr,OPEN_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
     if(f!=INVALID_HANDLE_VALUE) { DWORD n; WriteFile(f,message,(DWORD)strlen(message),&n,nullptr); CloseHandle(f); }
 }
-static void __cdecl DrawScaled(void* canvas,float center,float y,const wchar_t* text,void* font,const void* color) {
+static void DrawScaledWithOffset(void* canvas,float center,float y,const wchar_t* text,void* font,const void* color,float offset) {
     if(!canvas || !font || !text) return;
     int width=0,height=0;
     // Preserve the original wrapper's varargs measurement ABI.
     g_measure(font,&width,&height,text);
-    g_draw(canvas,center-width*g_scale*0.5f,y+g_verticalOffset,text,font,color,g_scale,g_scale,0.0f,nullptr);
+    g_draw(canvas,center-width*g_scale*0.5f,y+offset,text,font,color,g_scale,g_scale,0.0f,nullptr);
     if(InterlockedCompareExchange(&g_drawLogged,1,0)==0) Log("Subtitle drawing hook reached.\r\n");
+}
+static void __cdecl DrawScaled(void* canvas,float center,float y,const wchar_t* text,void* font,const void* color) {
+    DrawScaledWithOffset(canvas,center,y,text,font,color,g_verticalOffset);
+}
+static void __cdecl DrawCutsceneScaled(void* canvas,float center,float y,const wchar_t* text,void* font,const void* color) {
+    DrawScaledWithOffset(canvas,center,y,text,font,color,g_cutsceneVerticalOffset);
+}
+static bool ReadVerticalOffsets(const wchar_t* ini) {
+    wchar_t value[64],cutsceneValue[64];
+    GetPrivateProfileStringW(L"Subtitles",L"VerticalOffset",L"0",value,64,ini);
+    wchar_t* end=nullptr; double parsed=wcstod(value,&end);
+    if(end==value || *end || !std::isfinite(parsed) || parsed<-1000.0 || parsed>1000.0) {
+        Log("Invalid VerticalOffset; use -1000 to 1000 pixels. No hooks installed.\r\n"); return false;
+    }
+    // Existing INIs keep their previous video subtitle position.
+    GetPrivateProfileStringW(L"Subtitles",L"CutsceneVerticalOffset",value,cutsceneValue,64,ini);
+    double cutsceneParsed=wcstod(cutsceneValue,&end);
+    if(end==cutsceneValue || *end || !std::isfinite(cutsceneParsed) || cutsceneParsed<-1000.0 || cutsceneParsed>1000.0) {
+        Log("Invalid CutsceneVerticalOffset; use -1000 to 1000 pixels. No hooks installed.\r\n"); return false;
+    }
+    g_verticalOffset=(float)parsed;
+    g_cutsceneVerticalOffset=(float)cutsceneParsed;
+    return true;
 }
 // LEA replacements preserve flags and every register except the destination.
 static __declspec(naked) void StepEax() {
@@ -51,7 +75,8 @@ static void MakePatches(BYTE* base,Patch (&p)[kPatchCount]) {
     for(unsigned i=0;i<10;i++) {
         p[i].at=base+draws[i]; p[i].size=5;
         CallBytes(p[i].before,p[i].at,base+0x6b00a0);
-        CallBytes(p[i].after,p[i].at,DrawScaled);
+        // First five calls are gameplay; last five are video text and shadows.
+        CallBytes(p[i].after,p[i].at,i<5?DrawScaled:DrawCutsceneScaled);
     }
     // One load supplies both confirmed layout ScaleX/ScaleY fields.
     p[10].at=base+0x955ea5; p[10].size=8;
@@ -127,7 +152,7 @@ extern "C" __declspec(dllexport) BOOL __cdecl InitializeSubtitleScale() {
     wcscpy_s(dot,MAX_PATH-(dot-g_logPath),L".log");
     HANDLE log=CreateFileW(g_logPath,GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
     if(log!=INVALID_HANDLE_VALUE) CloseHandle(log);
-    Log("Arkham Subtitle Scale 0.2.1 (x86).\r\n");
+    Log("Arkham Subtitle Scale 0.2.2 (x86).\r\n");
     if(!GetPrivateProfileIntW(L"Subtitles",L"Enabled",1,ini)) { Log("Disabled; no hooks installed.\r\n"); return TRUE; }
     wchar_t value[64]; GetPrivateProfileStringW(L"Subtitles",L"Scale",L"2.0",value,64,ini);
     wchar_t* end=nullptr; double parsed=wcstod(value,&end);
@@ -135,12 +160,7 @@ extern "C" __declspec(dllexport) BOOL __cdecl InitializeSubtitleScale() {
         Log("Invalid Scale; use 0.5 to 4.0 with a decimal point. No hooks installed.\r\n"); return FALSE;
     }
     g_scale=(float)parsed;
-    GetPrivateProfileStringW(L"Subtitles",L"VerticalOffset",L"0",value,64,ini);
-    parsed=wcstod(value,&end);
-    if(end==value || *end || !std::isfinite(parsed) || parsed<-1000.0 || parsed>1000.0) {
-        Log("Invalid VerticalOffset; use -1000 to 1000 pixels. No hooks installed.\r\n"); return FALSE;
-    }
-    g_verticalOffset=(float)parsed;
+    if(!ReadVerticalOffsets(ini)) return FALSE;
     g_steps[0]=(int)std::lround(18.0f*g_scale); g_steps[1]=(int)std::lround(26.0f*g_scale);
     if(!SupportedExe(exe)) { Log("Unsupported EXE SHA256; no hooks installed.\r\n"); return FALSE; }
     BYTE* base=(BYTE*)GetModuleHandleW(nullptr);
@@ -151,7 +171,7 @@ extern "C" __declspec(dllexport) BOOL __cdecl InitializeSubtitleScale() {
     g_measure=(MeasureFn)(base+0x6584b0); g_draw=(DrawFn)(base+0x6a7ed0);
     Patch patches[kPatchCount]={}; MakePatches(base,patches);
     if(!ApplyPatches(patches)) { Log("Hook validation/protection failed; no hooks installed.\r\n"); return FALSE; }
-    char message[160]; sprintf_s(message,"Installed 13 hooks. Scale=%.3f; VerticalOffset=%.1f px; line steps=%d/%d.\r\n",g_scale,g_verticalOffset,g_steps[0],g_steps[1]);
+    char message[224]; sprintf_s(message,"Installed 13 hooks. Scale=%.3f; VerticalOffset=%.1f px; CutsceneVerticalOffset=%.1f px; line steps=%d/%d.\r\n",g_scale,g_verticalOffset,g_cutsceneVerticalOffset,g_steps[0],g_steps[1]);
     Log(message); return TRUE;
 }
 BOOL WINAPI DllMain(HINSTANCE instance,DWORD reason,LPVOID) {
