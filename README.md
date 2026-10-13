@@ -8,8 +8,6 @@
 
 Configurable subtitle size and vertical positioning for **Batman: Arkham Asylum GOTY (Windows)**.
 
-**Version 0.2.2 adds separate vertical positioning for video cutscene subtitles.** Video subtitles start lower than gameplay subtitles, so they can now use their own offset. GOG support from v0.2.1 is retained, with and without the Joker DLC patch. Subtitle scaling at 3x has been confirmed in gameplay at 3840x2160. A user reported aligned gameplay and video subtitles with `VerticalOffset=100` and `CutsceneVerticalOffset=-50`; the new binary has passed automated tests, but has not yet been verified in-game by the maintainer.
-
 <details>
 <summary><strong>In-game preview — click to expand</strong><br><br></summary>
 
