@@ -13,11 +13,15 @@ if errorlevel 1 exit /b 1
 :compile
 cd /d "%~dp0"
 if not exist build mkdir build
-cl /nologo /W4 /O2 /MT /EHsc /LD src\SubtitleScale.cpp /Fobuild\SubtitleScale.obj /Febuild\ArkhamSubtitleScale.asi /link /MACHINE:X86 advapi32.lib
+cl /nologo /W4 /O2 /MT /EHsc /std:c++17 /c src\NativeFont.cpp /Fobuild\NativeFont.obj
+if errorlevel 1 exit /b 1
+cl /nologo /W4 /O2 /MT /EHsc /std:c++17 /LD src\SubtitleScale.cpp build\NativeFont.obj /Fobuild\SubtitleScale.obj /Febuild\ArkhamSubtitleScale.asi /link /MACHINE:X86 advapi32.lib d3d9.lib dxguid.lib gdiplus.lib user32.lib
 if errorlevel 1 exit /b 1
 cl /nologo /W4 /O2 /MT /EHsc /LD src\Loader.cpp /Fobuild\Loader.obj /Febuild\dinput8.dll /link /MACHINE:X86 /DEF:src\Loader.def
 if errorlevel 1 exit /b 1
-cl /nologo /W4 /O2 /MT /EHsc src\Tests.cpp /Fobuild\Tests.obj /Febuild\Tests.exe /link /MACHINE:X86 advapi32.lib
+cl /nologo /W4 /O2 /MT /EHsc /std:c++17 src\Tests.cpp build\NativeFont.obj /Fobuild\Tests.obj /Febuild\Tests.exe /link /MACHINE:X86 advapi32.lib d3d9.lib dxguid.lib gdiplus.lib user32.lib
+if errorlevel 1 exit /b 1
+cl /nologo /W4 /O2 /MT /EHsc /std:c++17 src\FontTests.cpp build\NativeFont.obj /Fobuild\FontTests.obj /Febuild\FontTests.exe /link /MACHINE:X86 advapi32.lib d3d9.lib dxguid.lib gdiplus.lib user32.lib
 if errorlevel 1 exit /b 1
 build\Tests.exe %*
 exit /b %errorlevel%

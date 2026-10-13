@@ -7,6 +7,7 @@
 #include <cwchar>
 #include <cstdlib>
 #include <cstdint>
+#include "NativeFont.h"
 
 static float g_scale = 2.0f;
 static float g_verticalOffset = 0.0f;
@@ -27,6 +28,7 @@ static void DrawScaledWithOffset(void* canvas,float center,float y,const wchar_t
     int width=0,height=0;
     // Preserve the original wrapper's varargs measurement ABI.
     g_measure(font,&width,&height,text);
+    NativeFontDrawScope nativeFontDraw;
     g_draw(canvas,center-width*g_scale*0.5f,y+offset,text,font,color,g_scale,g_scale,0.0f,nullptr);
     if(InterlockedCompareExchange(&g_drawLogged,1,0)==0) Log("Subtitle drawing hook reached.\r\n");
 }
@@ -152,7 +154,7 @@ extern "C" __declspec(dllexport) BOOL __cdecl InitializeSubtitleScale() {
     wcscpy_s(dot,MAX_PATH-(dot-g_logPath),L".log");
     HANDLE log=CreateFileW(g_logPath,GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
     if(log!=INVALID_HANDLE_VALUE) CloseHandle(log);
-    Log("Arkham Subtitle Scale 0.2.2 (x86).\r\n");
+    Log("Arkham Subtitle Scale 0.3.0 (x86), original native font contours; game LZO decoder; menu performance fix.\r\n");
     if(!GetPrivateProfileIntW(L"Subtitles",L"Enabled",1,ini)) { Log("Disabled; no hooks installed.\r\n"); return TRUE; }
     wchar_t value[64]; GetPrivateProfileStringW(L"Subtitles",L"Scale",L"2.0",value,64,ini);
     wchar_t* end=nullptr; double parsed=wcstod(value,&end);
@@ -168,6 +170,13 @@ extern "C" __declspec(dllexport) BOOL __cdecl InitializeSubtitleScale() {
     if(nt->FileHeader.Machine!=IMAGE_FILE_MACHINE_I386 || nt->OptionalHeader.SizeOfImage!=40579072) {
         Log("Unexpected PE layout; no hooks installed.\r\n"); return FALSE;
     }
+    wchar_t gameRoot[MAX_PATH];wcscpy_s(gameRoot,exe);
+    wchar_t* binarySlash=wcsrchr(gameRoot,L'\\');if(!binarySlash) return FALSE;*binarySlash=0;
+    wchar_t* rootSlash=wcsrchr(gameRoot,L'\\');if(!rootSlash) return FALSE;*rootSlash=0;
+    if(GetPrivateProfileIntW(L"Subtitles",L"NativeFont",1,ini)) {
+        if(!InitializeNativeFontDecoder(base,Log) || !PrepareNativeFonts(gameRoot,Log) || !InstallNativeFontHooks(Log))
+            Log("Native fonts unavailable. Falling back to the original bitmap scaling, with the same layout and offsets.\r\n");
+    } else Log("NativeFont=0. Using the original bitmap scaling.\r\n");
     g_measure=(MeasureFn)(base+0x6584b0); g_draw=(DrawFn)(base+0x6a7ed0);
     Patch patches[kPatchCount]={}; MakePatches(base,patches);
     if(!ApplyPatches(patches)) { Log("Hook validation/protection failed; no hooks installed.\r\n"); return FALSE; }
