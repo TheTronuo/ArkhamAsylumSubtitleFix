@@ -39,6 +39,7 @@ Edit `Binaries/ArkhamSubtitleScale.ini`, then restart the game:
 ```ini
 [Subtitles]
 Enabled=1
+NativeFont=1
 Scale=3.0
 VerticalOffset=100
 CutsceneVerticalOffset=-50
