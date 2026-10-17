@@ -1,3 +1,10 @@
+# 0.3.1
+
+- Fix blurry subtitles after display mode/resolution changes, including DLDSR
+  (issue #2). Restore native font hooks after Direct3D9 Reset.
+- Disable the prerelease's forced detailed diagnostics; retain normal status
+  and error logging. No configuration changes are required.
+
 # 0.3.1-rc.1
 
 - Restore Direct3D9 device hooks after Reset replaces method dispatch during
