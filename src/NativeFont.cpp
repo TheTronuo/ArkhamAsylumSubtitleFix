@@ -23,6 +23,7 @@ namespace {
 using Bytes=std::vector<unsigned char>;
 constexpr unsigned kResolution=4;
 FontLog logger;
+bool fontDiagnostics=false;
 void Note(const char* s) { if(logger) logger(s); }
 [[noreturn]] void Bad(const char* s) { throw std::runtime_error(s); }
 // The inspected Steam/GOG builds contain the same bounded LZO1X decoder.
@@ -438,15 +439,16 @@ using CreateTextureFn=HRESULT (WINAPI*)(IDirect3DDevice9*,UINT,UINT,UINT,DWORD,D
 using SetTextureFn=HRESULT (WINAPI*)(IDirect3DDevice9*,DWORD,IDirect3DBaseTexture9*);
 using UpdateTextureFn=HRESULT (WINAPI*)(IDirect3DDevice9*,IDirect3DBaseTexture9*,IDirect3DBaseTexture9*);
 using UpdateSurfaceFn=HRESULT (WINAPI*)(IDirect3DDevice9*,IDirect3DSurface9*,const RECT*,IDirect3DSurface9*,const POINT*);
+using ResetFn=HRESULT (WINAPI*)(IDirect3DDevice9*,D3DPRESENT_PARAMETERS*);
 using LockTextureFn=HRESULT (WINAPI*)(IDirect3DTexture9*,UINT,D3DLOCKED_RECT*,const RECT*,DWORD);
 using UnlockTextureFn=HRESULT (WINAPI*)(IDirect3DTexture9*,UINT);
 using ReleaseTextureFn=ULONG (WINAPI*)(IDirect3DTexture9*);
-struct DeviceFunctions {CreateTextureFn create;SetTextureFn set;UpdateTextureFn update;UpdateSurfaceFn surface;};
+struct DeviceFunctions {CreateTextureFn create;SetTextureFn set;UpdateTextureFn update;UpdateSurfaceFn surface;ResetFn reset;};
 struct TextureFunctions {LockTextureFn lock;UnlockTextureFn unlock;ReleaseTextureFn release;};
 using TexturePtr=std::shared_ptr<IDirect3DTexture9>;
 struct TextureState {
     unsigned width=0,height=0;D3DLOCKED_RECT locked{};
-    bool full=false,replacementFailed=false;uint64_t revision=0;
+    bool full=false,replacementFailed=false,diagnosticBound=false;uint64_t revision=0;
     std::shared_ptr<Atlas> atlas;TexturePtr replacement;
 };
 using TextureStatePtr=std::shared_ptr<TextureState>;
@@ -460,6 +462,9 @@ std::map<void**,TextureFunctions> textureFunctions;
 // could re-enter that half-destroyed registry while the DLL is shutting down.
 std::map<IDirect3DTexture9*,TextureStatePtr>& textures=*new std::map<IDirect3DTexture9*,TextureStatePtr>;
 LONG bindLogged=0;
+LONG diagnosticSets=0,diagnosticMatches=0,diagnosticScopes=0,diagnosticDetails=0,diagnosticUntracked=0;
+LONG diagnosticPresentationTick=0;
+std::map<IDirect3DDevice9*,std::string> diagnosticPresentations;
 void** Table(void* object) {return *reinterpret_cast<void***>(object);}
 bool WriteSlot(void** slot,void* value) {
     DWORD old;if(!VirtualProtect(slot,sizeof(void*),PAGE_READWRITE,&old)) return false;
@@ -608,13 +613,41 @@ HRESULT WINAPI HookUpdateSurface(IDirect3DDevice9* device,IDirect3DSurface9* sou
     }
     if(src) src->Release();if(dst) dst->Release();return hr;
 }
+void DescribePresentation(IDirect3DDevice9* device,bool force=false) {
+    if(!fontDiagnostics) return;
+    DWORD now=GetTickCount();LONG previous=InterlockedCompareExchange(&diagnosticPresentationTick,0,0);
+    if(!force && ((DWORD)(now-(DWORD)previous)<1000 || InterlockedCompareExchange(&diagnosticPresentationTick,(LONG)now,previous)!=previous)) return;
+    D3DPRESENT_PARAMETERS pp{};IDirect3DSwapChain9* swap=nullptr;
+    if(SUCCEEDED(device->GetSwapChain(0,&swap)) && swap) {swap->GetPresentParameters(&pp);swap->Release();}
+    D3DSURFACE_DESC back{},target{};D3DVIEWPORT9 viewport{};IDirect3DSurface9* surface=nullptr;
+    if(SUCCEEDED(device->GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,&surface)) && surface) {surface->GetDesc(&back);surface->Release();surface=nullptr;}
+    if(SUCCEEDED(device->GetRenderTarget(0,&surface)) && surface) {surface->GetDesc(&target);surface->Release();}
+    device->GetViewport(&viewport);
+    D3DDEVICE_CREATION_PARAMETERS creation{};device->GetCreationParameters(&creation);
+    HWND window=pp.hDeviceWindow?pp.hDeviceWindow:creation.hFocusWindow;RECT client{};GetClientRect(window,&client);
+    using DpiFn=UINT (WINAPI*)(HWND);auto dpiFn=(DpiFn)GetProcAddress(GetModuleHandleW(L"user32.dll"),"GetDpiForWindow");
+    char details[400];sprintf_s(details,"device=%p windowed=%u swapchain=%ux%u backbuffer=%ux%u target=%ux%u viewport=%lux%lu client=%ldx%ld dpi=%u nativeBound=%ld",
+        device,pp.Windowed?1u:0u,pp.BackBufferWidth,pp.BackBufferHeight,back.Width,back.Height,target.Width,target.Height,viewport.Width,viewport.Height,client.right-client.left,client.bottom-client.top,dpiFn?dpiFn(window):0,bindLogged);
+    bool changed;
+    {std::lock_guard<std::recursive_mutex> guard(hookMutex);auto& last=diagnosticPresentations[device];changed=last!=details;last=details;}
+    if(force || changed) {std::string msg="DIAG presentation: ";msg+=details;msg+=".\r\n";Note(msg.c_str());}
+}
 HRESULT WINAPI HookSetTexture(IDirect3DDevice9* device,DWORD stage,IDirect3DBaseTexture9* base) {
     DeviceFunctions functions{};if(!OriginalFunctions(deviceFunctions,device,functions)) return D3DERR_INVALIDCALL;
+    if(fontDiagnostics) InterlockedIncrement(&diagnosticSets);
     auto state=FindTexture((IDirect3DTexture9*)base);
     // Only known font-sized uploads enter the replacement path. Other scene
     // and Scaleform textures pass through without any driver queries/readback.
     // Keep known font bindings valid when UE3 flushes deferred text batches.
-    if(!state && !nativeDrawDepth) return functions.set(device,stage,base);
+    if(!state && !nativeDrawDepth) {
+        // Bounded, opt-in observation of deferred batches. Never read back or
+        // change unrelated resources; production keeps its original fast path.
+        if(fontDiagnostics && diagnosticScopes && base && diagnosticUntracked<32 && InterlockedIncrement(&diagnosticUntracked)<=32 && base->GetType()==D3DRTYPE_TEXTURE) {
+            D3DSURFACE_DESC desc{};
+            if(SUCCEEDED(((IDirect3DTexture9*)base)->GetLevelDesc(0,&desc))) {char msg[200];sprintf_s(msg,"DIAG untracked deferred bind: device=%p texture=%p stage=%lu size=%ux%u fmt=%08x pool=%u.\r\n",device,base,stage,desc.Width,desc.Height,(unsigned)desc.Format,(unsigned)desc.Pool);Note(msg);}
+        }
+        return functions.set(device,stage,base);
+    }
     if(base && !state && base->GetType()==D3DRTYPE_TEXTURE) {
         auto texture=(IDirect3DTexture9*)base;D3DSURFACE_DESC desc{};InterlockedIncrement(&lateInspections);
         if(SUCCEEDED(texture->GetLevelDesc(0,&desc))) {
@@ -626,8 +659,11 @@ HRESULT WINAPI HookSetTexture(IDirect3DDevice9* device,DWORD stage,IDirect3DBase
         }
     }
     TexturePtr replacement;std::shared_ptr<Atlas> atlas;uint64_t revision=0;
+    bool describe=false,matched=false;
     if(state) {
         std::lock_guard<std::recursive_mutex> guard(hookMutex);
+        matched=bool(state->atlas);
+        if(fontDiagnostics && diagnosticScopes && !state->diagnosticBound) {state->diagnosticBound=true;describe=true;}
         replacement=state->replacement;
         if(state->atlas && !replacement && !state->replacementFailed) {
             state->replacementFailed=true;atlas=state->atlas;revision=state->revision;
@@ -643,6 +679,7 @@ HRESULT WINAPI HookSetTexture(IDirect3DDevice9* device,DWORD stage,IDirect3DBase
         if(!current) replacement.reset();
     }
     IDirect3DBaseTexture9* bound=replacement?replacement.get():base;
+    if(fontDiagnostics && matched) InterlockedIncrement(&diagnosticMatches);
     HRESULT hr=functions.set(device,stage,bound);
     if(FAILED(hr) && replacement) {
         TexturePtr retired;
@@ -654,14 +691,61 @@ HRESULT WINAPI HookSetTexture(IDirect3DDevice9* device,DWORD stage,IDirect3DBase
         Note("Native font binding rejected; reverted to the original bitmap texture.\r\n");
     }
     if(SUCCEEDED(hr) && bound!=base && InterlockedCompareExchange(&bindLogged,1,0)==0) Note("Native 4x font texture bound successfully. Original game renderer and glyph metrics retained.\r\n");
+    if(fontDiagnostics && matched) DescribePresentation(device);
+    if(fontDiagnostics && diagnosticDetails<24 && (describe || nativeDrawDepth) && InterlockedIncrement(&diagnosticDetails)<=24) {
+        D3DSURFACE_DESC textureDesc{},targetDesc{};D3DVIEWPORT9 viewport{};IDirect3DSurface9* target=nullptr;
+        DWORD minFilter=0,magFilter=0,srgb=0;HRESULT descHr=E_FAIL;
+        if(base && base->GetType()==D3DRTYPE_TEXTURE) descHr=((IDirect3DTexture9*)base)->GetLevelDesc(0,&textureDesc);
+        if(SUCCEEDED(device->GetRenderTarget(0,&target)) && target) {target->GetDesc(&targetDesc);target->Release();}
+        device->GetViewport(&viewport);device->GetSamplerState(stage,D3DSAMP_MINFILTER,&minFilter);
+        device->GetSamplerState(stage,D3DSAMP_MAGFILTER,&magFilter);device->GetSamplerState(stage,D3DSAMP_SRGBTEXTURE,&srgb);
+        char msg[512];sprintf_s(msg,"DIAG tracked texture bind: device=%p texture=%p stage=%lu tracked=%u matched=%u native=%u scope=%u desc=%08lx texture=%ux%u fmt=%08x target=%ux%u viewport=%lux%lu filter=%lu/%lu srgb=%lu result=%08lx.\r\n",
+            device,base,stage,state?1u:0u,matched?1u:0u,bound!=base?1u:0u,nativeDrawDepth,(unsigned long)descHr,
+            textureDesc.Width,textureDesc.Height,(unsigned)textureDesc.Format,targetDesc.Width,targetDesc.Height,viewport.Width,viewport.Height,minFilter,magFilter,srgb,(unsigned long)hr);Note(msg);
+    }
     return hr;
 }
-bool HookDeviceTable(IDirect3DDevice9* device) {
+bool HookDeviceTable(IDirect3DDevice9* device,const DeviceFunctions* fallback=nullptr);
+HRESULT WINAPI HookReset(IDirect3DDevice9* device,D3DPRESENT_PARAMETERS* params) {
+    DeviceFunctions functions{};if(!OriginalFunctions(deviceFunctions,device,functions)) return D3DERR_INVALIDCALL;
+    if(fontDiagnostics && params) {char msg[200];sprintf_s(msg,"DIAG Reset requested: backbuffer=%ux%u windowed=%u.\r\n",params->BackBufferWidth,params->BackBufferHeight,params->Windowed?1u:0u);Note(msg);}
+    HRESULT hr=functions.reset(device,params);
+    // The runtime/driver can rebuild method dispatch during Reset (observed
+    // when switching fullscreen/windowed). Refresh displaced delegates before
+    // restoring our hooks, including Reset itself for subsequent switches.
+    const bool displaced=Table(device)[65]!=(void*)HookSetTexture;
+    const bool restored=HookDeviceTable(device,&functions);
+    if(displaced && restored) Note("Native font device hooks restored after Direct3D9 Reset.\r\n");
+    if(!restored) Note("Native font device hook restoration failed after Direct3D9 Reset.\r\n");
+    if(fontDiagnostics) {char msg[160];sprintf_s(msg,"DIAG Reset result=%08lx SetTextureDisplaced=%u SetTextureHooked=%u.\r\n",(unsigned long)hr,displaced?1u:0u,Table(device)[65]==(void*)HookSetTexture?1u:0u);Note(msg);if(SUCCEEDED(hr)) DescribePresentation(device,true);}
+    return hr;
+}
+bool HookDeviceTable(IDirect3DDevice9* device,const DeviceFunctions* fallback) {
     std::lock_guard<std::recursive_mutex> guard(hookMutex);
-    void** table=Table(device);if(deviceFunctions.count(table)) return true;
-    DeviceFunctions functions{(CreateTextureFn)table[23],(SetTextureFn)table[65],(UpdateTextureFn)table[31],(UpdateSurfaceFn)table[30]};deviceFunctions.emplace(table,functions);
-    if(WriteSlot(table+23,(void*)HookCreateTexture) && WriteSlot(table+65,(void*)HookSetTexture) && WriteSlot(table+31,(void*)HookUpdateTexture) && WriteSlot(table+30,(void*)HookUpdateSurface)) return true;
-    WriteSlot(table+23,(void*)functions.create);WriteSlot(table+65,(void*)functions.set);WriteSlot(table+31,(void*)functions.update);WriteSlot(table+30,(void*)functions.surface);deviceFunctions.erase(table);return false;
+    void** table=Table(device);auto existing=deviceFunctions.find(table);
+    const bool hadEntry=existing!=deviceFunctions.end();
+    const DeviceFunctions saved=hadEntry?existing->second:DeviceFunctions{};
+    DeviceFunctions functions=hadEntry?saved:(fallback?*fallback:DeviceFunctions{});
+    constexpr unsigned slots[]={23,65,31,30,16};
+    void* hooks[]={(void*)HookCreateTexture,(void*)HookSetTexture,(void*)HookUpdateTexture,(void*)HookUpdateSurface,(void*)HookReset};
+    void* before[5];for(unsigned i=0;i<5;i++) before[i]=table[slots[i]];
+    // Keep the delegate when a slot still points to us; storing our own hook
+    // as its delegate would recurse. A displaced slot supplies the new delegate.
+    if(before[0]!=hooks[0]) functions.create=(CreateTextureFn)before[0];
+    if(before[1]!=hooks[1]) functions.set=(SetTextureFn)before[1];
+    if(before[2]!=hooks[2]) functions.update=(UpdateTextureFn)before[2];
+    if(before[3]!=hooks[3]) functions.surface=(UpdateSurfaceFn)before[3];
+    if(before[4]!=hooks[4]) functions.reset=(ResetFn)before[4];
+    if(!functions.create || !functions.set || !functions.update || !functions.surface || !functions.reset) return false;
+    deviceFunctions[table]=functions;
+    for(unsigned i=0;i<5;i++) {
+        if(before[i]==hooks[i] || WriteSlot(table+slots[i],hooks[i])) continue;
+        // Restore only slots changed by this attempt, then the prior registry.
+        for(unsigned j=0;j<i;j++) if(before[j]!=hooks[j]) WriteSlot(table+slots[j],before[j]);
+        if(hadEntry) deviceFunctions[table]=saved;else deviceFunctions.erase(table);
+        return false;
+    }
+    return true;
 }
 HRESULT WINAPI HookCreateDevice(IDirect3D9* d3d,UINT adapter,D3DDEVTYPE type,HWND window,DWORD behavior,D3DPRESENT_PARAMETERS* params,IDirect3DDevice9** out) {
     CreateDeviceFn original=nullptr;if(!OriginalFunctions(factoryFunctions,d3d,original)) return D3DERR_INVALIDCALL;
@@ -669,12 +753,27 @@ HRESULT WINAPI HookCreateDevice(IDirect3D9* d3d,UINT adapter,D3DDEVTYPE type,HWN
     if(SUCCEEDED(hr) && out && *out) {
         if(HookDeviceTable(*out)) Note("Game Direct3D9 device intercepted; native font texture hooks active.\r\n");
         else Note("Direct3D9 device hook failed.\r\n");
+        if(fontDiagnostics && params) {char msg[256];sprintf_s(msg,"DIAG device: device=%p backbuffer=%ux%u windowed=%u multisample=%u behavior=%08lx.\r\n",*out,params->BackBufferWidth,params->BackBufferHeight,params->Windowed?1u:0u,(unsigned)params->MultiSampleType,behavior);Note(msg);}
     }
     return hr;
 }
 } // namespace
 
-void EnterNativeFontDraw() {nativeDrawDepth++;}
+void SetNativeFontDiagnostics(bool enabled) {fontDiagnostics=enabled;}
+void EnterNativeFontDraw() {
+    nativeDrawDepth++;
+    if(!fontDiagnostics) return;
+    LONG count=InterlockedIncrement(&diagnosticScopes);
+    if(count<=0 || (count&(count-1))) return;
+    std::string report;
+    {
+        std::lock_guard<std::recursive_mutex> guard(hookMutex);
+        unsigned recognized=0,replacements=0;for(const auto& item:textures) {recognized+=item.second->atlas?1u:0u;replacements+=item.second->replacement?1u:0u;}
+        char msg[320];sprintf_s(msg,"DIAG subtitle scope %ld: SetTexture calls=%ld matched calls=%ld tracked=%u recognized=%u replacements=%u nativeBound=%ld.\r\n",count,diagnosticSets,diagnosticMatches,(unsigned)textures.size(),recognized,replacements,bindLogged);report+=msg;
+        for(const auto& entry:deviceFunctions) {sprintf_s(msg,"DIAG device table=%p SetTexture=%p expected=%p hooked=%u CreateTextureHooked=%u.\r\n",entry.first,entry.first[65],(void*)HookSetTexture,entry.first[65]==(void*)HookSetTexture?1u:0u,entry.first[23]==(void*)HookCreateTexture?1u:0u);report+=msg;}
+    }
+    Note(report.c_str());
+}
 void LeaveNativeFontDraw() {if(nativeDrawDepth) nativeDrawDepth--;}
 
 bool InstallNativeFontHooks(FontLog log) {
@@ -717,6 +816,23 @@ HRESULT WINAPI CheckUnlockedCreation(IDirect3DDevice9* device,UINT w,UINT h,UINT
 HRESULT WINAPI RejectNativeBinding(IDirect3DDevice9* device,DWORD stage,IDirect3DBaseTexture9* base) {
     if(base && base->GetType()==D3DRTYPE_TEXTURE) {D3DSURFACE_DESC d{};if(SUCCEEDED(((IDirect3DTexture9*)base)->GetLevelDesc(0,&d)) && d.Format==D3DFMT_A8R8G8B8) return D3DERR_INVALIDCALL;}
     return bindingDelegate(device,stage,base);
+}
+ResetFn resetDelegate;
+SetTextureFn resetBindingDelegate;
+LONG resetBindingCalls=0;
+HRESULT WINAPI ReboundSetTexture(IDirect3DDevice9* device,DWORD stage,IDirect3DBaseTexture9* base) {
+    InterlockedIncrement(&resetBindingCalls);return resetBindingDelegate(device,stage,base);
+}
+HRESULT WINAPI RebindMethodsOnReset(IDirect3DDevice9* device,D3DPRESENT_PARAMETERS* params) {
+    HRESULT hr=resetDelegate(device,params);
+    if(SUCCEEDED(hr)) {
+        auto current=(SetTextureFn)Table(device)[65];
+        if(current!=HookSetTexture && current!=ReboundSetTexture) resetBindingDelegate=current;
+        assert(resetBindingDelegate && resetBindingDelegate!=HookSetTexture && resetBindingDelegate!=ReboundSetTexture);
+        assert(WriteSlot(Table(device)+65,(void*)ReboundSetTexture));
+        assert(WriteSlot(Table(device)+16,(void*)RebindMethodsOnReset));
+    }
+    return hr;
 }
 }
 bool TestNativeFontGPU(FontLog log) {
@@ -807,6 +923,24 @@ bool TestNativeFontGPU(FontLog log) {
         for(unsigned y=0;y<desc.Height;y++) assert(!memcmp((BYTE*)gpu.pBits+(size_t)y*gpu.Pitch,a->pixels.data()+(size_t)y*desc.Width,(size_t)desc.Width*4));
         assert(SUCCEEDED(((IDirect3DTexture9*)b)->UnlockRect(0)));b->Release();device->SetTexture(0,nullptr);localized->Release();
     }
-    assert(textures.empty());assert(SUCCEEDED(device->Reset(&pp)));device->Release();DestroyWindow(window);
+    assert(textures.empty());
+    // Reproduce the observed runtime dispatch replacement on a real device:
+    // both SetTexture and Reset are displaced by the reset delegate. Native
+    // binding must survive every switch and call the refreshed SetTexture.
+    auto resetFont=make(D3DPOOL_MANAGED);upload(resetFont,false);
+    resetDelegate=functions.reset;resetBindingDelegate=functions.set;functions.reset=RebindMethodsOnReset;
+    for(unsigned pass=0;pass<3;pass++) {
+        pp.BackBufferWidth=pass+1;pp.BackBufferHeight=pass+1;
+        assert(SUCCEEDED(device->Reset(&pp)));
+        assert(Table(device)[65]==(void*)HookSetTexture && Table(device)[16]==(void*)HookReset);
+        assert(functions.set==ReboundSetTexture);
+        assert(HookDeviceTable(device));assert(functions.set==ReboundSetTexture);
+        LONG forwarded=resetBindingCalls;
+        assert(SUCCEEDED(device->SetTexture(0,resetFont)));b=bound();assert(b && b!=resetFont);b->Release();
+        assert(resetBindingCalls>forwarded);assert(SUCCEEDED(device->SetTexture(0,nullptr)));
+    }
+    functions.reset=resetDelegate;resetFont->Release();assert(textures.empty());
+    Note("PASS: three real device resets with simulated SetTexture/Reset dispatch replacement restore hooks, refresh delegates without recursion, and preserve native font binding.\r\n");
+    device->Release();DestroyWindow(window);
     Note("PASS: real Direct3D9 font upload/binding for all localization atlases, pixel equality, changed/partial texture rejection, staged texture/surface transfers, allocation/binding failure bitmap fallback, resource release and device reset.\r\n");return true;
 }

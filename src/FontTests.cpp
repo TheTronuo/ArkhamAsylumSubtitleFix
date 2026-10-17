@@ -21,6 +21,7 @@ static HMODULE MapTestDecoder(const wchar_t* exe) {
     return game;
 }
 int wmain(int argc,wchar_t** argv) {
+    SetNativeFontDiagnostics(true);
     assert(TestNativeFontRejection());
     if(argc<2) {puts("PASS: malformed package/movie/glyph rejection. Supply game root and optional localized package for resource tests.");return 0;}
     assert(!PrepareNativeFonts(L"build\\missing-native-font-test-root",Print));
@@ -48,6 +49,8 @@ int wmain(int argc,wchar_t** argv) {
         assert(TestNativeFontPackage(path,L"build\\font-previews",Print));packages++;
     } while(FindNextFileW(search,&found));FindClose(search);
     for(int i=2;i<argc;i++) {if(!wcscmp(argv[i],L"-exe")) {i++;continue;}assert(TestNativeFontPackage(argv[i],L"build\\font-previews",Print));packages++;}
+    assert(TestNativeFontGPU(Print));
+    SetNativeFontDiagnostics(false);
     assert(TestNativeFontGPU(Print));
     printf("PASS: %u real localization packages decompressed, original outlines parsed and native font pages generated.\n",packages);
     FreeLibrary(game);

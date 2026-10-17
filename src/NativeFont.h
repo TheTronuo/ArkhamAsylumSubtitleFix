@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 using FontLog = void (*)(const char*);
+void SetNativeFontDiagnostics(bool enabled);
 void EnterNativeFontDraw();
 void LeaveNativeFontDraw();
 struct NativeFontDrawScope {

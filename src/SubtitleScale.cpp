@@ -154,7 +154,10 @@ extern "C" __declspec(dllexport) BOOL __cdecl InitializeSubtitleScale() {
     wcscpy_s(dot,MAX_PATH-(dot-g_logPath),L".log");
     HANDLE log=CreateFileW(g_logPath,GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
     if(log!=INVALID_HANDLE_VALUE) CloseHandle(log);
-    Log("Arkham Subtitle Scale 0.3.0 (x86), original native font contours; game LZO decoder; menu performance fix.\r\n");
+    Log("Arkham Subtitle Scale 0.3.1-rc.1 (x86), original native font contours; Direct3D9 Reset recovery.\r\n");
+    // Temporary prerelease diagnostics: existing INIs need no new setting.
+    SetNativeFontDiagnostics(true);
+    Log("DIAG native font diagnostics forced on for 0.3.1-rc.1 (DLDSR investigation).\r\n");
     if(!GetPrivateProfileIntW(L"Subtitles",L"Enabled",1,ini)) { Log("Disabled; no hooks installed.\r\n"); return TRUE; }
     wchar_t value[64]; GetPrivateProfileStringW(L"Subtitles",L"Scale",L"2.0",value,64,ini);
     wchar_t* end=nullptr; double parsed=wcstod(value,&end);
